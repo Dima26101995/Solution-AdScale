@@ -1,0 +1,106 @@
+@startuml
+!include <C4/C4_Container>
+
+LAYOUT_WITH_LEGEND()
+LAYOUT_LANDSCAPE()
+
+skinparam defaultFontSize 10
+skinparam ArrowFontSize 8
+skinparam wrapWidth 210
+skinparam nodesep 140
+skinparam ranksep 170
+skinparam shadowing false
+
+title C4 Container Diagram — AdScale (TO-BE, через год)
+
+' ====================== Акторы ======================
+Person(advertiser, "Рекламодатель", "Управляет кампаниями, бюджетами и ставками")
+Person_Ext(endUser, "Пользователь сайта/приложения", "Просматривает рекламу, кликает по баннерам")
+
+System_Ext(dspPartner, "DSP-партнёр", "Bid-requests / responses по OpenRTB")
+System_Ext(paymentGateway, "Платёжный шлюз", "Пополнение рекламных бюджетов")
+
+' ====================== Платформа ======================
+System_Boundary(adscale, "AdScale Platform") {
+
+    Container(gateway, "API Gateway", "Envoy", "Единая точка входа: аутентификация, ограничение частоты, маршрутизация, Circuit Breaker, мониторинг времени отклика")
+
+    Container(dashboard, "Dashboard BFF", "Node.js", "Агрегация данных для UI рекламодателя")
+
+    Container(bidding, "Bidding Service", "Go / C++", "RTB: приём bid-request, аукцион, победитель, bid-response (stateless)")
+
+    Container(campaign, "Campaign Service", "Go", "Кампании, бюджеты, ставки, таргетинг")
+
+    Container(delivery, "Delivery Service", "Node.js", "Генерация HTML/JS-разметки и response (stateless)")
+
+    Container(stats, "Statistics Service", "Go / Python", "Приём и обработка событий показов, кликов и ставок")
+
+    Container(analytics, "Analytics Service", "Python", "Отчёты и агрегаты (OLAP)")
+
+    Container(billing, "Financial Service", "Go", "Списание, счета, балансы (ACID, идемпотентность)")
+}
+
+' ====================== Данные и инфраструктура ======================
+ContainerQueue(kafka, "Kafka Cluster", "Apache Kafka", "Поток событий: показы, клики, списания; DLQ, replay")
+ContainerDb(redis, "Redis Cluster", "Redis", "Кеш кампаний, бюджетов, ставок; счётчик расхода бюджета")
+ContainerDb(pgCampaign, "PostgreSQL (campaign)", "PostgreSQL", "Кампании, бюджеты, ставки, таргетинг; read replica")
+ContainerDb(pgBilling, "PostgreSQL (financial)", "PostgreSQL", "Финансы: транзакции, балансы")
+ContainerDb(clickhouse, "ClickHouse", "ClickHouse", "События и аналитика (OLAP, append-only)")
+
+' ====================== Внешние связи ======================
+Rel(dspPartner, gateway, "Bid-requests / responses", "HTTPS / OpenRTB")
+Rel(endUser, delivery, "Просмотр рекламы и клики", "HTTPS")
+Rel(advertiser, gateway, "Управление кампаниями и бюджетами", "HTTPS")
+Rel(billing, paymentGateway, "Пополнение бюджета", "HTTPS / REST")
+
+' ====================== Маршрутизация ======================
+Rel(gateway, bidding, "Маршрутизация bid-requests", "HTTP/2")
+Rel(gateway, dashboard, "Маршрутизация UI-запросов", "HTTP")
+
+' ====================== Критический путь ======================
+Rel(bidding, redis, "Кампании, бюджеты, ставки (кеш)", "Redis")
+Rel(bidding, campaign, "Данные кампаний и таргетинга (при промахе кеша)", "gRPC")
+Rel(bidding, delivery, "Победитель аукциона, разметка", "gRPC")
+
+' ====================== Асинхронные события ======================
+Rel(delivery, kafka, "События показов и кликов", "асинхронно")
+Rel(campaign, kafka, "campaign.updated", "асинхронно")
+BiRel(bidding, kafka, "События ставок, аукционов, списаний →\n← campaign.updated (инвалидация кеша)")
+Rel(kafka, stats, "Потребление событий", "асинхронно")
+Rel(kafka, analytics, "События для агрегатов", "асинхронно")
+Rel(kafka, billing, "События списаний", "асинхронно")
+
+' ====================== Хранилища ======================
+Rel(campaign, pgCampaign, "Чтение/запись кампаний", "JDBC")
+Rel(campaign, redis, "Инициализация счётчика бюджета", "Redis")
+Rel(billing, pgBilling, "Транзакции, балансы", "JDBC")
+Rel(stats, clickhouse, "Пакетная запись событий", "асинхронно / пакетно")
+Rel(analytics, clickhouse, "Аналитические запросы", "SQL")
+
+' ====================== UI-агрегация ======================
+Rel(dashboard, campaign, "Данные кампаний", "REST")
+Rel(dashboard, billing, "Финансы", "REST")
+Rel(dashboard, analytics, "Отчёты", "REST")
+
+' ====================== Аннотации ======================
+note right of bidding
+  **Критический путь**
+  Без синхронной БД
+  Кеш + gRPC
+  Разбор + аукцион ≤ 28 мс
+end note
+
+note bottom of kafka
+  Не менее одного раза,
+  DLQ, идемпотентный
+  потребитель
+end note
+
+note bottom of clickhouse
+  Аналитика не влияет
+  на сервис ставок
+end note
+
+' ====================== Метрики целевого состояния ======================
+caption **Целевые показатели:** 50 000 RPS (год), 18 000 RPS (3 мес) · P95 ≤ 80 мс (DSP), ≤ 100 мс (аукцион) · SLA 99.9%, мультирегион
+@enduml

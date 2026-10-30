@@ -1,0 +1,61 @@
+@startuml
+!include <C4/C4_Component>
+
+LAYOUT_WITH_LEGEND()
+LAYOUT_LANDSCAPE()
+
+title C4 Component Diagram — Bidding Service
+
+' ====================== Внешние элементы ======================
+Container(apiGateway, "API Gateway", "Envoy", "Маршрутизация, ограничение частоты, аутентификация")
+
+Container_Boundary(bidding, "Bidding Service (stateless)") {
+
+    Component(handler, "Bid Request Handler", "HTTP/2, JSON", "Валидация bid-request, контроль tmax, формирование ответа")
+
+    Component(targeting, "Targeting Filter", "Go", "Отбор кандидатов по гео, устройству, формату, времени")
+
+    Component(auction, "Auction Engine", "Go", "Расчёт ставок, выбор победителя (first / second price)")
+
+    Component(budget, "Budget Reservation", "Go", "Атомарное резервирование бюджета победителя")
+
+    Component(publisher, "Event Publisher", "Kafka client", "Публикация событий ставок, аукционов и списаний")
+
+    Component(invalidator, "Cache Invalidator", "Kafka consumer", "Инвалидация кеша по событию campaign.updated")
+
+    Component(circuit, "Circuit Breaker", "Go", "Защита вызовов Campaign и Delivery")
+}
+
+ContainerDb(redis, "Redis", "1 инстанс + реплика", "Кеш кампаний, счётчики бюджета")
+Container(campaign, "Campaign Service", "Go", "Источник кампаний и таргетинга")
+Container(delivery, "Delivery Service", "Node.js", "Генерация HTML/JS-разметки")
+ContainerQueue(kafka, "Kafka", "1 брокер, JSON (этап 1)", "События ставок, показов, кликов")
+
+' ====================== Поток запроса ======================
+Rel(apiGateway, handler, "bid-request", "HTTPS / OpenRTB → HTTP/2")
+Rel(handler, targeting, "Запрос кандидатов")
+Rel(targeting, redis, "Кампании по срезу таргетинга", "Redis")
+Rel(targeting, circuit, "Промах кеша → Campaign")
+Rel(circuit, campaign, "GetCandidates", "REST (ACL) / gRPC")
+Rel(targeting, auction, "Отфильтрованные кандидаты")
+Rel(auction, budget, "Победитель и цена")
+Rel(budget, redis, "Атомарное уменьшение бюджета", "Redis")
+Rel(auction, circuit, "Запрос разметки")
+Rel(circuit, delivery, "RenderCreative", "gRPC")
+Rel(auction, publisher, "Событие аукциона")
+Rel(publisher, kafka, "Публикация событий", "асинхронно")
+Rel(kafka, invalidator, "campaign.updated", "асинхронно")
+Rel(invalidator, redis, "Удаление ключей кеша", "Redis")
+Rel(budget, handler, "Результат аукциона")
+Rel(handler, apiGateway, "bid-response / no-bid", "HTTPS")
+
+' ====================== Аннотации ======================
+note right of auction
+  **Критический путь**
+  Redis (кеш) вместо синхронной БД
+  Таймаут tmax
+  Ошибка зависимости → no-bid
+end note
+
+caption Промежуточное решение: 18 000 RPS · P95 ≤100 мс (DSP ≤80 мс) · stateless, 2+ экземпляра · деградация до no-bid без ошибок HTTP
+@enduml

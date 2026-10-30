@@ -1,0 +1,61 @@
+@startuml
+!include <C4/C4_Container>
+
+LAYOUT_WITH_LEGEND()
+LAYOUT_LANDSCAPE()
+
+title C4 Container — масштабирование: репликация, read replicas, CQRS
+
+System_Boundary(adscale, "AdScale Platform") {
+
+    Container(bidding, "Bidding Service", "2+ экземпляра", "Stateless, читает кеш")
+
+    Container(campaign, "Campaign Service", "2+ экземпляра", "Запись — мастер, чтение — реплика")
+
+    Container(stats, "Statistics Service", "2+ потребителя", "CQRS: только запись событий")
+
+    Container(analytics, "Analytics Service", "2+ экземпляра", "CQRS: только чтение агрегатов")
+
+    Container(billing, "Financial Service", "2+ экземпляра", "Запись — мастер, отчёты — реплика")
+}
+
+ContainerDb(redisMaster, "Redis (master)", "Запись", "Кеш, счётчик бюджета")
+ContainerDb(redisReplica, "Redis (replica)", "Чтение", "Копия кеша")
+
+ContainerDb(pgCampaignMaster, "PostgreSQL campaign (master)", "Запись", "Кампании, лимиты")
+ContainerDb(pgCampaignReplica, "PostgreSQL campaign (replica)", "Чтение", "Read replica для аналитики и отчётов")
+
+ContainerDb(pgBillingMaster, "PostgreSQL financial (master)", "Запись", "Деньги")
+ContainerDb(pgBillingReplica, "PostgreSQL financial (replica)", "Чтение", "Отчёты и сверка")
+
+ContainerQueue(kafka, "Kafka", "Партиции по campaign_id", "Группы потребителей")
+
+Rel(bidding, redisMaster, "Чтение/запись кеша и счётчика", "Redis")
+Rel(redisMaster, redisReplica, "Репликация", "асинхронно")
+
+Rel(campaign, pgCampaignMaster, "Запись", "JDBC")
+Rel(pgCampaignMaster, pgCampaignReplica, "Репликация", "WAL")
+
+
+Rel(kafka, stats, "Потребление событий", "группа statistics")
+Rel(kafka, analytics, "Чтение событий", "группа analytics")
+Rel(analytics, pgCampaignReplica, "Аналитические запросы", "JDBC")
+
+Rel(billing, pgBillingMaster, "Запись", "JDBC")
+Rel(pgBillingMaster, pgBillingReplica, "Репликация", "WAL")
+Rel(billing, pgBillingReplica, "Отчёты и сверка", "JDBC")
+
+note right of kafka
+  **Партиции** — единица
+  параллелизма: больше партиций —
+  больше потребителей
+end note
+
+note bottom of pgCampaignReplica
+  **Задержка репликации**
+  допустима для отчётов;
+  после записи читаем мастер
+end note
+
+caption Этап 1: репликация master-slave + read replicas + CQRS · шардирование — год (50 000 RPS) · автоскейлинг — Kubernetes (этап 2)
+@enduml
