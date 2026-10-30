@@ -1,0 +1,66 @@
+@startuml
+!include <C4/C4_Container>
+
+LAYOUT_WITH_LEGEND()
+LAYOUT_LANDSCAPE()
+
+title C4 Container — топология данных (Database per Service)
+
+System_Boundary(adscale, "AdScale Platform") {
+
+    Container(bidding, "Bidding Service", "Go / C++", "Stateless: кеш + события, своей БД нет")
+
+    Container(campaign, "Campaign Service", "Go", "Кампании, бюджетные лимиты, таргетинг")
+
+    Container(delivery, "Delivery Service", "Node.js", "Stateless: только разметка")
+
+    Container(stats, "Statistics Service", "Go / Python", "Запись событий, append-only")
+
+    Container(analytics, "Analytics Service", "Python", "Агрегаты и отчёты")
+
+    Container(billing, "Financial Service", "Go", "Деньги: ACID, идемпотентность")
+}
+
+ContainerDb(redis, "Redis", "1 инстанс + реплика (этап 1) → Cluster (этап 2)", "Кеш кампаний, счётчик и резерв бюджета")
+ContainerDb(pgCampaign, "PostgreSQL (campaign)", "Master + read replica", "Кампании, лимиты, ставки, таргетинг")
+ContainerDb(pgBilling, "PostgreSQL (financial)", "Master + read replica", "Финансы, балансы, списания")
+ContainerDb(pgStats, "PostgreSQL (statistics)", "Партиционирование (этап 1)", "События показов, кликов, аукционов")
+ContainerQueue(kafka, "Kafka", "1 брокер (этап 1) → кластер (этап 2)", "События показов, кликов, ставок, списаний")
+ContainerDb(clickhouse, "ClickHouse", "Этап 2", "События и аналитика, append-only")
+
+Rel(bidding, redis, "Чтение кеша, резерв бюджета", "Redis")
+Rel(bidding, kafka, "События ставок и списаний", "асинхронно")
+
+Rel(campaign, pgCampaign, "Чтение и запись", "JDBC")
+Rel(campaign, redis, "Инициализация счётчика бюджета", "Redis")
+Rel(campaign, kafka, "campaign.updated", "асинхронно")
+
+Rel(delivery, kafka, "Показы и клики", "асинхронно")
+
+Rel(kafka, stats, "Потребление событий", "асинхронно")
+Rel(kafka, bidding, "campaign.updated (инвалидация кеша)", "асинхронно")
+Rel(kafka, billing, "События списаний", "асинхронно")
+Rel(kafka, analytics, "События для агрегатов", "асинхронно")
+
+Rel(stats, pgStats, "Запись событий (этап 1)", "JDBC")
+Rel(stats, clickhouse, "Запись событий (этап 2)", "пакетно")
+Rel(analytics, pgCampaign, "Чтение с read replica (этап 1)", "JDBC")
+Rel(analytics, clickhouse, "Аналитические запросы (этап 2)", "SQL")
+
+Rel(billing, pgBilling, "Транзакции, балансы", "JDBC")
+
+note right of bidding
+  **Stateless**
+  Своей БД нет:
+  кеш + события
+end note
+
+note bottom of pgCampaign
+  Владелец данных —
+  Campaign Service.
+  Другие читают только
+  через API или replica
+end note
+
+caption Database per Service: у каждого сервиса своё хранилище · общая схема отсутствует · Bidding и Delivery — stateless
+@enduml

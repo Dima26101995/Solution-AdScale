@@ -1,0 +1,64 @@
+@startuml
+autonumber
+skinparam sequenceMessageAlign left
+skinparam maxMessageSize 120
+
+title Sequence — обработка bid-request (P95 ≤80 мс для DSP)
+
+participant "DSP-партнёр" as DSP
+participant "Балансировщик" as LB
+participant "API Gateway\n(Envoy)" as GW
+participant "Bidding Service" as BS
+participant "Redis" as R
+participant "Campaign Service" as CS
+participant "Delivery Service" as DS
+participant "Kafka" as K
+
+DSP -> LB: POST /rtb/bid (OpenRTB, tmax=80 мс)
+LB -> GW: маршрутизация
+GW -> GW: аутентификация\nограничение частоты\nпроверка размыкателя
+GW -> BS: bid-request (HTTP/2), таймаут 70 мс
+
+BS -> R: Чтение кеша кампаний по срезу таргетинга
+alt Кеш попадание (~5 мс)
+    R --> BS: список кандидатов
+else Промах кеша (~20 мс)
+    BS -> CS: GetCandidates (REST через ACL), таймаут 15 мс
+    CS --> BS: кампании
+    BS -> R: Заполнение кеша (TTL 5 минут)
+end
+
+BS -> BS: фильтрация по таргетингу
+BS -> BS: расчёт ставок, выбор победителя
+
+BS -> R: Атомарная проверка и резерв бюджета
+alt Бюджет доступен
+    R --> BS: 1 (зарезервировано)
+
+    alt Разметка получена
+        BS -> DS: RenderCreative (gRPC), таймаут 10 мс
+        DS --> BS: HTML/JS + tracking URL
+        BS -> K: bid.events (асинхронно, без ожидания)
+        BS --> GW: bid-response (победитель, цена, adm)
+        GW --> DSP: 200 OK, bid-response
+    else Delivery недоступен
+        BS -> BS: fallback: no-bid (нет adm)
+        BS -> R: возврат резерва бюджета
+        BS --> GW: bid-response без seatbid (no-bid)
+        GW --> DSP: 200 OK, no-bid
+    end
+else Бюджет исчерпан
+    R --> BS: 0
+    BS --> GW: bid-response без seatbid (no-bid, nbr)
+    GW --> DSP: 200 OK, no-bid
+end
+
+note over BS
+  Общий бюджет: ~46 мс (hit) / ~56 мс (miss)
+  Запас до 80 мс: 24–34 мс
+end note
+
+note over GW
+  Метрики: время ответа, P95, доля ошибок
+end note
+@enduml

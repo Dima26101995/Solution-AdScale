@@ -1,0 +1,102 @@
+@startuml
+!include <C4/C4_Container>
+
+LAYOUT_WITH_LEGEND()
+LAYOUT_LANDSCAPE()
+
+skinparam defaultFontSize 10
+skinparam ArrowFontSize 8
+skinparam wrapWidth 210
+skinparam nodesep 140
+skinparam ranksep 170
+skinparam shadowing false
+
+title C4 Container Diagram — AdScale (промежуточное решение, 3 месяца)
+
+' ====================== Акторы ======================
+Person(advertiser, "Рекламодатель", "Управляет кампаниями, бюджетами и ставками")
+Person_Ext(endUser, "Пользователь сайта/приложения", "Просматривает рекламу, кликает по баннерам")
+
+System_Ext(dspPartner, "DSP-партнёр", "Bid-requests / responses по OpenRTB")
+System_Ext(paymentGateway, "Платёжный шлюз", "Пополнение рекламных бюджетов")
+
+' ====================== Новые сервисы ======================
+System_Boundary(newServices, "Новые сервисы (вынесены из монолита)") {
+
+    Container(gateway, "API Gateway", "Envoy, 2+ экземпляра", "Аутентификация, ограничение частоты, маршрутизация, Circuit Breaker, метрики времени отклика")
+
+    Container(bidding, "Bidding Service", "Go / C++", "RTB: приём bid-request, аукцион, победитель, bid-response (stateless); Circuit Breaker, таймауты, no-bid")
+
+    Container(stats, "Statistics Service", "Go / Python", "Потребитель событий из Kafka; запись в PostgreSQL с партиционированием")
+}
+
+' ====================== Монолит (остаётся) ======================
+System_Boundary(monolith, "Монолит (этап 1)") {
+
+    Container(campaign, "Campaign Service", "Go", "Кампании, бюджеты, ставки, таргетинг (доступ через ACL)")
+
+    Container(delivery, "Delivery Service", "Node.js", "Генерация HTML/JS-разметки и response (stateless)")
+
+    Container(billing, "Financial Service", "Go", "Списание, счета, балансы (идемпотентность, сверка)")
+
+    Container(analytics, "Analytics Service", "Python", "Отчёты и агрегаты; чтение из read replica")
+
+    Container(dashboard, "Dashboard BFF", "Node.js", "Агрегация данных для UI рекламодателя")
+}
+
+' ====================== Инфраструктура ======================
+ContainerQueue(kafka, "Kafka", "1 брокер, JSON (этап 1)", "События показов, кликов, ставок и списаний; DLQ")
+ContainerDb(redis, "Redis", "1 инстанс + реплика", "Кеш кампаний, бюджетов, ставок; счётчик расхода бюджета")
+ContainerDb(pg, "PostgreSQL (production)", "PostgreSQL", "Транзакционные данные; партиционированные таблицы событий")
+ContainerDb(pgReplica, "PostgreSQL (read replica)", "PostgreSQL", "Реплика для аналитики")
+
+' ====================== Внешние связи ======================
+Rel(dspPartner, gateway, "Bid-requests / responses", "HTTPS / OpenRTB")
+Rel(endUser, delivery, "Просмотр рекламы и клики", "HTTPS")
+Rel(advertiser, gateway, "Управление кампаниями и бюджетами", "HTTPS")
+Rel(billing, paymentGateway, "Пополнение бюджета", "HTTPS / REST")
+
+' ====================== Маршрутизация ======================
+Rel(gateway, bidding, "Маршрутизация bid-requests", "HTTP/2")
+Rel(gateway, dashboard, "Маршрутизация UI-запросов", "HTTP")
+
+' ====================== Критический путь ======================
+Rel(bidding, redis, "Кампании, бюджеты, ставки (кеш)", "Redis")
+Rel(bidding, campaign, "Данные кампаний (ACL, read-only API монолита)", "REST")
+Rel(bidding, delivery, "Победитель аукциона, разметка", "Internal Call / gRPC")
+
+' ====================== Асинхронные события ======================
+Rel(delivery, kafka, "События показов и кликов", "асинхронно")
+Rel(campaign, kafka, "campaign.updated", "асинхронно")
+BiRel(bidding, kafka, "События ставок, аукционов, списаний →\n← campaign.updated (инвалидация кеша)")
+Rel(kafka, stats, "Потребление событий", "асинхронно")
+Rel(kafka, billing, "События списаний", "асинхронно")
+
+' ====================== Хранилища ======================
+Rel(stats, pg, "Запись событий (партиционированные таблицы)", "JDBC")
+Rel(campaign, pg, "Чтение и запись кампаний", "JDBC")
+Rel(campaign, redis, "Инициализация счётчика бюджета", "Redis")
+Rel(billing, pg, "Транзакции, балансы", "JDBC")
+Rel(analytics, pgReplica, "Аналитические запросы", "JDBC")
+
+' ====================== UI-агрегация ======================
+Rel(dashboard, campaign, "Данные кампаний")
+Rel(dashboard, billing, "Финансы")
+Rel(dashboard, analytics, "Отчёты")
+
+' ====================== Аннотации ======================
+note right of bidding
+  **Критический путь**
+  Без синхронной БД
+  Redis + ACL
+  Circuit Breaker, no-bid
+end note
+
+note bottom of pg
+  Аналитика вынесена
+  на read replica
+end note
+
+' ====================== Метрики этапа ======================
+caption Промежуточное решение (3 месяца): 18 000 RPS · P95 ≤ 100 мс (DSP ≤ 80 мс) · сервис ставок без сбоев · критичные и некритичные потоки разделены · непрерывность бизнеса сохранена
+@enduml

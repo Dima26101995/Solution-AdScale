@@ -1,0 +1,87 @@
+@startuml
+autonumber
+skinparam sequenceMessageAlign left
+skinparam maxMessageSize 120
+
+title Sequence — деградация без простоев
+
+participant "DSP-партнёр" as DSP
+participant "API Gateway\n(Envoy)" as GW
+participant "Bidding Service" as BS
+participant "Redis" as R
+participant "Campaign Service" as CS
+participant "Delivery Service" as DS
+participant "Kafka" as K
+
+== Сценарий 1: размыкатель разомкнут на Gateway ==
+
+DSP -> GW: POST /rtb/bid
+GW -> GW: размыкатель разомкнут\n(50% ошибок за 10 с)
+GW --> DSP: 503, когда повторить
+
+note over GW
+  Очередь не накапливается,
+  перегрузка не передаётся в Bidding
+end note
+
+== Сценарий 2: Campaign недоступен ==
+
+DSP -> GW: POST /rtb/bid
+GW -> BS: bid-request
+BS -> R: Чтение кеша кампаний
+R --> BS: кеш пуст
+BS -> CS: GetCandidates (REST через ACL)
+CS --> BS: таймаут / ошибка
+BS -> BS: размыкатель разомкнут (15 с)\nдефолтная ставка
+BS --> GW: bid-response с дефолтной ставкой
+GW --> DSP: 200 OK
+
+note over BS
+  Дефолтная ставка: последняя валидная,
+  но не ниже минимальной цены
+end note
+
+== Сценарий 3: Delivery недоступен ==
+
+DSP -> GW: POST /rtb/bid
+GW -> BS: bid-request
+BS -> R: резерв бюджета
+BS -> DS: RenderCreative (gRPC)
+DS --> BS: таймаут 10 мс
+BS -> BS: fallback: no-bid (нет adm)
+BS -> R: возврат резерва бюджета
+BS --> GW: bid-response без seatbid (no-bid)
+GW --> DSP: 200 OK, no-bid
+
+note over BS
+  Без разметки показ невозможен;
+  резерв бюджета возвращается
+end note
+
+== Сценарий 4: Kafka недоступен ==
+
+BS -> K: bid.events
+K --> BS: ошибка / таймаут
+BS -> BS: буфер в памяти (10 000 событий)
+BS --> GW: bid-response (ответ не задержан)
+GW --> DSP: 200 OK
+
+note over BS
+  Ответ не зависит от Kafka:
+  публикация асинхронная
+end note
+
+== Сценарий 5: полный отказ зависимостей ==
+
+DSP -> GW: POST /rtb/bid
+GW -> BS: bid-request
+BS -> BS: нет кандидатов / Redis недоступен
+BS --> GW: bid-response без seatbid (no-bid)
+GW --> DSP: 200 OK, no-bid (пустой seatbid)
+
+note over DSP
+  Bidding отвечает no-bid (200 без seatbid);
+  503 бывает только при разомкнутом
+  размыкателе на Gateway
+end note
+@enduml
