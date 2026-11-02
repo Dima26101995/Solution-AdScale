@@ -1,0 +1,50 @@
+@startuml
+!include <C4/C4_Container>
+
+LAYOUT_WITH_LEGEND()
+LAYOUT_LANDSCAPE()
+
+title Event Streaming — топики Kafka, продюсеры и потребители
+
+Container(delivery, "Delivery Service", "Node.js", "Показы и клики")
+
+Container(bidding, "Bidding Service", "Go / C++", "Результаты аукциона, списания")
+
+Container(campaign, "Campaign Service", "Go", "Изменения кампаний")
+
+ContainerQueue(kafka, "Kafka", "5 топиков · ключ campaign_id · JSON (этап 1) → Avro (этап 2)", "impression.events · click.events · bid.events · billing.events · campaign.updated")
+
+Container(stats, "Statistics Service", "Группа statistics", "Запись событий в PostgreSQL / ClickHouse")
+
+Container(analytics, "Analytics Service", "Группа analytics", "Агрегаты и отчёты")
+
+Container(billing, "Financial Service", "Группа financial", "Списания и сверка")
+
+Container(invalidator, "Cache Invalidator", "Группа cache-invalidation", "Инвалидация кеша (компонент Bidding)")
+
+Rel(delivery, kafka, "impression.events, click.events", "асинхронно")
+Rel(bidding, kafka, "bid.events, billing.events", "асинхронно")
+Rel(campaign, kafka, "campaign.updated", "асинхронно")
+
+Rel(kafka, stats, "Потребление событий", "группа statistics")
+Rel(kafka, analytics, "Потребление событий", "группа analytics")
+Rel(kafka, billing, "billing.events", "группа financial")
+Rel(kafka, invalidator, "campaign.updated", "группа cache-invalidation")
+
+note right of kafka
+  **Гарантии**
+  Не менее одного раза
+  Дедупликация по event_id
+  Порядок в партиции по campaign_id
+  1 брокер (этап 1) → 3 (этап 2)
+end note
+
+note bottom of stats
+  **Retention**
+  События — 7 дней
+  billing.events — 30 дней
+  campaign.updated — 1 день
+end note
+
+caption События вне критического пути · запись не блокирует ответ DSP · replay для восстановления · DLQ после 3 попыток
+@enduml
