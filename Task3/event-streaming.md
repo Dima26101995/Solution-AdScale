@@ -16,7 +16,7 @@ Kafka развязывает производителей и потребите�
 | `impression.events` | Показ рекламы | Delivery | Statistics, Analytics | `campaign_id` | 7 дней |
 | `click.events` | Клик по рекламе | Delivery | Statistics, Analytics | `campaign_id` | 7 дней |
 | `bid.events` | Результат аукциона | Bidding | Statistics | `campaign_id` | 7 дней |
-| `billing.events` | Списание, резервирование | Bidding | Financial | `campaign_id` | 30 дней |
+| `billing.events` | Списание, резервирование | Bidding (через outbox) | Financial | `campaign_id` | 30 дней |
 | `campaign.updated` | Изменение кампании | Campaign | Bidding (инвалидация кеша) | `campaign_id` | 1 день |
 
 `billing.events` хранится дольше: по нему проводится сверка и разбор расхождений.
@@ -60,6 +60,7 @@ Kafka развязывает производителей и потребите�
 |---|---|
 | Доставка | Не менее одного раза: событие не теряется, но может прийти повторно |
 | Дедупликация | По `event_id` у потребителя |
+| Outbox | `billing.events` пишется в Redis Stream (AOF) до ответа DSP, релей публикует в Kafka |
 | Порядок | В пределах партиции по `campaign_id` |
 | Подтверждение | Продюсер ждёт подтверждения записи (acks=all) |
 | Кворум реплик | Этап 1 — 1 (один брокер); этап 2 — 2 из 3 для `billing.events` |

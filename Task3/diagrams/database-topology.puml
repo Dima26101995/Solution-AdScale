@@ -21,14 +21,14 @@ System_Boundary(adscale, "AdScale Platform") {
     Container(billing, "Financial Service", "Go", "Деньги: ACID, идемпотентность")
 }
 
-ContainerDb(redis, "Redis", "1 инстанс + реплика (этап 1) → Cluster (этап 2)", "Кеш кампаний, счётчик и резерв бюджета")
+ContainerDb(redis, "Redis", "1 инстанс + реплика (этап 1) → Cluster (этап 2)", "Кеш кампаний, счётчик и резерв бюджета, outbox billing.events")
 ContainerDb(pgCampaign, "PostgreSQL (campaign)", "Master + read replica", "Кампании, лимиты, ставки, таргетинг")
 ContainerDb(pgBilling, "PostgreSQL (financial)", "Master + read replica", "Финансы, балансы, списания")
 ContainerDb(pgStats, "PostgreSQL (statistics)", "Партиционирование (этап 1)", "События показов, кликов, аукционов")
 ContainerQueue(kafka, "Kafka", "1 брокер (этап 1) → кластер (этап 2)", "События показов, кликов, ставок, списаний")
 ContainerDb(clickhouse, "ClickHouse", "Этап 2", "События и аналитика, append-only")
 
-Rel(bidding, redis, "Чтение кеша, резерв бюджета", "Redis")
+Rel(bidding, redis, "Чтение кеша, резерв бюджета, outbox", "Redis")
 Rel(bidding, kafka, "События ставок и списаний", "асинхронно")
 
 Rel(campaign, pgCampaign, "Чтение и запись", "JDBC")

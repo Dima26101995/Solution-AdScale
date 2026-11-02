@@ -31,13 +31,14 @@ Financial Service (списания), Statistics / Analytics (события), D
 | **Targeting Filter** | Отбор кандидатов по гео, устройству, формату, времени | Redis, Campaign |
 | **Auction Engine** | Расчёт ставок, выбор победителя | Targeting Filter, Budget Reservation, Delivery (через Circuit Breaker) |
 | **Budget Reservation** | Атомарное резервирование бюджета | Redis |
-| **Event Publisher** | Публикация событий в Kafka | Kafka |
+| **Event Publisher** | Запись `billing.events` в outbox Redis, публикация прочих событий | Redis, Kafka |
+| **Outbox Relay** | Публикация `billing.events` из outbox Redis в Kafka | Redis, Kafka |
 | **Cache Invalidator** | Инвалидация кеша по событию `campaign.updated` | Kafka, Redis |
 | **Circuit Breaker** | Защита вызовов Campaign и Delivery | — |
 
 Поток обработки: `bid-request` → Bid Request Handler → Targeting Filter → Auction Engine →
-Budget Reservation → Bid Request Handler → `bid-response`. Событие публикуется
-асинхронно, параллельно ответу, через Event Publisher.
+Budget Reservation → Bid Request Handler → `bid-response`. Финансовое событие записывается
+в outbox Redis **до** ответа; остальные события публикуются асинхронно, параллельно ответу.
 
 **Cache Invalidator** работает вне потока запроса: читает `campaign.updated` из Kafka
 и удаляет устаревшие ключи Redis. При недоступности Kafka кеш живёт до истечения TTL (5 минут).
@@ -113,9 +114,9 @@ Budget Reservation → Bid Request Handler → `bid-response`. Событие п
 | Зависимость | Протокол | Назначение | Критичность | При отказе |
 |---|---|---|---|---|
 | Redis | Redis protocol | Кеш кампаний, счётчики бюджета | Критичная | no-bid: бюджет неизвестен, риск перерасхода |
-| Campaign Service | REST через ACL (этап 1) / gRPC (этап 2) | Источник кампаний при промахе кеша | Высокая | Работа по кешу Redis; при пустом кеше — дефолтная ставка |
+| Campaign Service | REST через ACL (этап 1) / gRPC (этап 2) | Источник кампаний при промахе кеша | Высокая | Работа по устаревшему кешу; кеш пуст — no-bid |
 | Delivery Service | Internal Call (gRPC) | Разметка креатива | Средняя | no-bid: без разметки показ невозможен |
-| Kafka | Kafka protocol | Публикация событий, инвалидация кеша | Низкая (асинхронно) | Буферизация событий в памяти; инвалидация — по TTL (5 минут) |
+| Kafka | Kafka protocol | Публикация событий, инвалидация кеша | Низкая (асинхронно) | `billing.events` — outbox Redis (AOF); остальные — буфер в памяти; инвалидация — по TTL (5 минут) |
 
 Financial Service и Statistics Service — **не прямые зависимости**: связь только через Kafka.
 Bidding Service **не вызывает синхронно** Financial Service и не пишет в PostgreSQL —
@@ -149,6 +150,12 @@ Bidding Service **не вызывает синхронно** Financial Service �
 
 **Резерв бюджета.** Временная запись с TTL 60 секунд: если подтверждение не пришло,
 резерв возвращается (компенсация).
+
+**Outbox финансовых событий.** `billing.events` пишется в Redis Stream (AOF) **до** ответа DSP.
+Outbox Relay публикует событие в Kafka и после `acks=all` удаляет его из потока. При падении
+экземпляра поток продолжает обрабатывать другой экземпляр — состояние вне процесса,
+stateless сохраняется. Остальные события идут через буфер в памяти: их потеря при падении
+допустима.
 
 ### 5.2 Почему нет собственной БД
 

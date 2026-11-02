@@ -19,7 +19,9 @@ Container_Boundary(bidding, "Bidding Service (stateless)") {
 
     Component(budget, "Budget Reservation", "Go", "Атомарное резервирование бюджета победителя")
 
-    Component(publisher, "Event Publisher", "Kafka client", "Публикация событий ставок, аукционов и списаний")
+    Component(publisher, "Event Publisher", "Redis Stream + Kafka client", "Запись billing.events в outbox, публикация прочих событий")
+
+    Component(relay, "Outbox Relay", "Redis Stream consumer", "Публикация billing.events из outbox в Kafka")
 
     Component(invalidator, "Cache Invalidator", "Kafka consumer", "Инвалидация кеша по событию campaign.updated")
 
@@ -43,7 +45,10 @@ Rel(budget, redis, "Атомарное уменьшение бюджета", "Re
 Rel(auction, circuit, "Запрос разметки")
 Rel(circuit, delivery, "RenderCreative", "gRPC")
 Rel(auction, publisher, "Событие аукциона")
-Rel(publisher, kafka, "Публикация событий", "асинхронно")
+Rel(publisher, redis, "billing.events → outbox", "Redis Stream")
+Rel(publisher, kafka, "Публикация прочих событий", "асинхронно")
+Rel(relay, redis, "Чтение outbox, XACK/XDEL", "Redis Stream")
+Rel(relay, kafka, "billing.events", "асинхронно")
 Rel(kafka, invalidator, "campaign.updated", "асинхронно")
 Rel(invalidator, redis, "Удаление ключей кеша", "Redis")
 Rel(budget, handler, "Результат аукциона")
